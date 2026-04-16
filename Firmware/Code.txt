@@ -1,0 +1,164 @@
+#include <WiFi.h>
+
+const char* ssid = "RollingBob-RC";
+const char* password = "12345678";
+
+WiFiServer server(80);
+
+// Direction pins
+const int IN1 = 26; // D26
+const int IN2 = 27; // D27
+const int IN3 = 14; // D14
+const int IN4 = 12; // D12
+
+// Speed (PWM) pins
+const int ENA = 25; // D25
+const int ENB = 33; // D33
+
+int speedVal = 160;
+
+// Movement helpers
+void stopMotors() {
+  digitalWrite(IN1, LOW); digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW); digitalWrite(IN4, LOW);
+}
+
+void forward() {
+  digitalWrite(IN1, HIGH); digitalWrite(IN2, LOW);
+  digitalWrite(IN3, HIGH); digitalWrite(IN4, LOW);
+}
+
+void backward() {
+  digitalWrite(IN1, LOW); digitalWrite(IN2, HIGH);
+  digitalWrite(IN3, LOW); digitalWrite(IN4, HIGH);
+}
+
+void leftTurn() {
+  // Right motor forward, left motor stop (pivot-ish)
+  digitalWrite(IN1, LOW);  digitalWrite(IN2, LOW);
+  digitalWrite(IN3, HIGH); digitalWrite(IN4, LOW);
+}
+
+void rightTurn() {
+  // Left motor forward, right motor stop (pivot-ish)
+  digitalWrite(IN1, HIGH); digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW);  digitalWrite(IN4, LOW);
+}
+
+// HTML UI (joystick-style)
+const char* HTML = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<style>
+  html,body{height:100%;margin:0;font-family:Arial;background:#ffffff;display:flex;align-items:center;justify-content:center;}
+  .wrap{width:min(420px,92vw);text-align:center;}
+  .pad{position:relative;width:min(320px,80vw);aspect-ratio:1/1;margin:0 auto 18px auto;}
+  .btn{
+    position:absolute;width:32%;aspect-ratio:1/1;border:none;border-radius:999px;
+    background:#2f67ff;box-shadow:0 10px 20px rgba(0,0,0,.12);
+    display:flex;align-items:center;justify-content:center;touch-action:none;
+  }
+  .btn:active{transform:scale(.96);}
+  .up{left:34%;top:0;} .down{left:34%;bottom:0;} .left{left:0;top:34%;} .right{right:0;top:34%;}
+  .arrow{width:0;height:0;border-left:14px solid transparent;border-right:14px solid transparent;border-bottom:24px solid #fff;}
+  .down .arrow{transform:rotate(180deg);} .left .arrow{transform:rotate(-90deg);} .right .arrow{transform:rotate(90deg);}
+  .meta{font-size:14px;color:#333;margin-top:8px;}
+  input[type=range]{width:85%;max-width:340px;}
+</style>
+<script>
+  function send(path){ fetch(path).catch(()=>{}); }
+
+  function bindHold(id, path){
+    const el = document.getElementById(id);
+    const start = (e)=>{ e.preventDefault(); send(path); };
+    const end   = (e)=>{ e.preventDefault(); send('/S'); };
+
+    el.addEventListener('touchstart', start, {passive:false});
+    el.addEventListener('touchend', end, {passive:false});
+    el.addEventListener('touchcancel', end, {passive:false});
+
+    el.addEventListener('mousedown', start);
+    document.addEventListener('mouseup', end);
+  }
+
+  window.addEventListener('load', ()=>{
+    bindHold('btnUp','/F');
+    bindHold('btnDown','/B');
+    bindHold('btnLeft','/L');
+    bindHold('btnRight','/R');
+
+    const slider = document.getElementById('spd');
+    const label = document.getElementById('spdLabel');
+
+    const pushSpeed = ()=>{
+      const v = slider.value;
+      label.textContent = v;
+      fetch('/SPD?SPD='+v).catch(()=>{});
+    };
+
+    slider.addEventListener('input', pushSpeed);
+    pushSpeed();
+  });
+</script>
+</head>
+<body>
+  <div class="wrap">
+    <div class="pad">
+      <button id="btnUp" class="btn up"><div class="arrow"></div></button>
+      <button id="btnLeft" class="btn left"><div class="arrow"></div></button>
+      <button id="btnRight" class="btn right"><div class="arrow"></div></button>
+      <button id="btnDown" class="btn down"><div class="arrow"></div></button>
+    </div>
+
+    <div class="meta">Speed: <span id="spdLabel">160</span></div>
+    <input id="spd" type="range" min="0" max="255" value="160">
+  </div>
+</body>
+</html>
+)rawliteral";
+
+void setup() {
+  pinMode(IN1, OUTPUT); pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT); pinMode(IN4, OUTPUT);
+
+  // PWM (ESP32 Arduino core v3.x)
+  ledcAttach(ENA, 1000, 8);
+  ledcAttach(ENB, 1000, 8);
+  ledcWrite(ENA, speedVal);
+  ledcWrite(ENB, speedVal);
+
+  stopMotors();
+
+  WiFi.softAP(ssid, password);
+  server.begin();
+}
+
+void loop() {
+  WiFiClient client = server.available();
+  if (!client) return;
+
+  String req = client.readStringUntil('\r');
+  client.flush();
+
+  // Commands
+  if (req.indexOf("GET /F") != -1) forward();
+  else if (req.indexOf("GET /B") != -1) backward();
+  else if (req.indexOf("GET /L") != -1) leftTurn();
+  else if (req.indexOf("GET /R") != -1) rightTurn();
+  else if (req.indexOf("GET /S") != -1) stopMotors();
+
+  // Speed: /SPD?SPD=0..255
+  int p = req.indexOf("SPD=");
+  if (p != -1) {
+    int v = req.substring(p + 4).toInt();
+    speedVal = constrain(v, 0, 255);
+    ledcWrite(ENA, speedVal);
+    ledcWrite(ENB, speedVal);
+  }
+
+  // Response
+  client.print("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n");
+  client.print(HTML);
+}
